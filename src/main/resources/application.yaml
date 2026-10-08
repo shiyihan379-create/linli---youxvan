@@ -25,3 +25,7 @@ mybatis-plus:
 logging:
   level:
     com.hmdp: debug
+rocketmq:
+  name-server: localhost:9876
+  producer:
+    group: seckill_producer
