@@ -57,8 +57,8 @@ public class UserController {
      */
     @PostMapping("/logout")
     public Result logout(){
-        // 实现登出功能
-        return Result.fail("功能未完成");
+        UserHolder.removeUser();
+        return Result.ok();
     }
 
     @GetMapping("/me")
@@ -79,5 +79,23 @@ public class UserController {
         info.setUpdateTime(null);
         // 返回
         return Result.ok(info);
+    }
+
+    /**
+     * 签到功能
+     * @return
+     */
+    @PostMapping("/sign")
+    public Result sign(){
+        return userService.sign();
+    }
+
+    /**
+     * 统计连续签到
+     * @return
+     */
+    @GetMapping("/sign/count")
+    public Result signCount(){
+        return userService.signCount();
     }
 }

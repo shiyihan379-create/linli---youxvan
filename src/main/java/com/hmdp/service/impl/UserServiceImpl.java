@@ -86,6 +86,16 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         return Result.ok(token);
     }
 
+    @Override
+    public Result sign() {
+        return null;
+    }
+
+    @Override
+    public Result signCount() {
+        return null;
+    }
+
     private User creatUserWithPhone(String phone) {
         // 1 创建用户对象
         User user = new User();
