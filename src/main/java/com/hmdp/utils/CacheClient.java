@@ -1,10 +1,11 @@
 package com.hmdp.utils;
 
-import cn.hutool.core.util.BooleanUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
@@ -23,10 +24,13 @@ public class CacheClient {
 
     private final StringRedisTemplate stringRedisTemplate;
 
+    private final RedissonClient redissonClient;
+
     private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
 
-    public CacheClient(StringRedisTemplate stringRedisTemplate) {
+    public CacheClient(StringRedisTemplate stringRedisTemplate, RedissonClient redissonClient) {
         this.stringRedisTemplate = stringRedisTemplate;
+        this.redissonClient = redissonClient;
     }
 
     /**
@@ -224,22 +228,28 @@ public class CacheClient {
     }
 
     /**
-     * 尝试获取锁
+     * 尝试获取锁（使用Redisson分布式锁）
      *
      * @param key 锁的key
      * @return 是否获取成功
      */
     private boolean tryLock(String key) {
-        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", LOCK_SHOP_TTL, TimeUnit.SECONDS);
-        return BooleanUtil.isTrue(flag);
+        RLock lock = redissonClient.getLock(key);
+        try {
+            return lock.tryLock(0, LOCK_SHOP_TTL, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
     }
 
     /**
-     * 释放锁
+     * 释放锁（Redisson内部使用Lua脚本保证原子性，不会误删别人的锁）
      *
      * @param key 锁的key
      */
     private void unlock(String key) {
-        stringRedisTemplate.delete(key);
+        RLock lock = redissonClient.getLock(key);
+        lock.unlock();
     }
 }

@@ -1,1 +1,2 @@
+com\hmdp\config\RedissonConfig.class
 com\hmdp\mq\SeckillOrderConsumer.class

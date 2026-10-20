@@ -11,6 +11,8 @@ import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.rocketmq.spring.core.RocketMQTemplate;
 import org.springframework.context.annotation.Lazy;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -36,18 +38,12 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     // 秒杀预判Lua脚本：原子性地完成库存判断、一人一单判断、扣减库存
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
-    // 分布式锁释放Lua脚本：保证只释放自己加的锁，防止误删别人的锁
-    private static final DefaultRedisScript<Long> UNLOCK_SCRIPT;
 
-    // 静态代码块：在类加载时初始化两个Lua脚本
+    // 静态代码块：在类加载时初始化Lua脚本
     static {
         SECKILL_SCRIPT = new DefaultRedisScript<>();
         SECKILL_SCRIPT.setResultType(Long.class);
         SECKILL_SCRIPT.setScriptSource(new ResourceScriptSource(new ClassPathResource("lua/seckill.lua")));
-
-        UNLOCK_SCRIPT = new DefaultRedisScript<>();
-        UNLOCK_SCRIPT.setResultType(Long.class);
-        UNLOCK_SCRIPT.setScriptSource(new ResourceScriptSource(new ClassPathResource("lua/unlock.lua")));
     }
 
     // 秒杀券服务，用于扣减数据库中的库存
@@ -61,6 +57,10 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     // Redis操作模板，用于执行Lua脚本、分布式锁等
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+
+    // Redisson分布式锁客户端
+    @Resource
+    private RedissonClient redissonClient;
 
     // RocketMQ消息队列操作模板，用于发送异步下单消息
     @Resource
@@ -119,7 +119,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     /**
      * 带分布式锁的下单方法（由RocketMQ消费者SeckillOrderConsumer调用）
-     * 使用Redis分布式锁保证同一用户同一优惠券不会并发重复下单
+     * 使用Redisson分布式锁保证同一用户同一优惠券不会并发重复下单
      * 锁粒度：userId + voucherId，不同用户/不同优惠券互不影响
      *
      * @param voucherOrder 订单信息
@@ -130,28 +130,25 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         Long voucherId = voucherOrder.getVoucherId();
 
         // 构造分布式锁的Key：lock:order:{userId}:{voucherId}
-        // 锁Value使用UUID，用于安全释放锁时验证是否是自己的锁
         String lockKey = LOCK_ORDER_KEY + userId + ":" + voucherId;
-        String lockValue = UUID.randomUUID().toString();
+        RLock lock = redissonClient.getLock(lockKey);
 
-        // 尝试获取分布式锁：SETNX + 过期时间（SET lockKey lockValue EX 10 NX）
-        // 如果锁已存在（其他线程持有），获取失败
-        Boolean isLock = stringRedisTemplate.opsForValue()
-                .setIfAbsent(lockKey, lockValue, LOCK_ORDER_TTL, java.util.concurrent.TimeUnit.SECONDS);
-        if (!Boolean.TRUE.equals(isLock)) {
-            log.error("获取分布式锁失败，userId={}, voucherId={}", userId, voucherId);
-            return;
-        }
+        // 尝试获取分布式锁（Redisson内置Watchdog机制自动续期，并保证释放锁的原子性）
+        // tryLock参数：等待时间=0（不等待，立即返回）, 锁超时时间=30s, 时间单位
         try {
+            boolean isLock = lock.tryLock(0, LOCK_ORDER_TTL, java.util.concurrent.TimeUnit.SECONDS);
+            if (!isLock) {
+                log.error("获取分布式锁失败，userId={}, voucherId={}", userId, voucherId);
+                return;
+            }
             // 获取锁成功，通过代理对象调用事务方法
-            // 必须通过voucherOrderService调用，而不是this，否则@Transactional事务不生效
             voucherOrderService.createVoucherOrderWithTx(voucherOrder);
+        } catch (InterruptedException e) {
+            log.error("获取分布式锁被中断，userId={}, voucherId={}", userId, voucherId);
+            Thread.currentThread().interrupt();
         } finally {
-            // 释放分布式锁：使用Lua脚本保证"判断锁值+删除锁"的原子性
-            // 防止误删别人的锁：先判断锁的值是否等于自己的UUID，是才删除
-            stringRedisTemplate.execute(UNLOCK_SCRIPT,
-                    Collections.singletonList(lockKey),
-                    lockValue);
+            // 释放分布式锁：Redisson内部使用Lua脚本保证"判断锁值+删除锁"的原子性
+            lock.unlock();
         }
     }
 
